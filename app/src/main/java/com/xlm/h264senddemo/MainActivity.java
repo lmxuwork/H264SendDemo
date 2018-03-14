@@ -17,6 +17,7 @@ import android.content.SharedPreferences;
 import android.hardware.Camera;
 import android.hardware.Camera.Size;
 import android.os.Bundle;
+import android.os.StrictMode;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -26,6 +27,8 @@ import android.view.View;
 import android.view.Window;
 import android.widget.Button;
 import android.widget.EditText;
+
+import com.xlm.h264senddemo.rtp.RtpSenderWrapper;
 
 
 public class MainActivity extends Activity {
@@ -37,65 +40,39 @@ public class MainActivity extends Activity {
 	private final static String SP_DEST_IP = "dest_ip";
 	private final static String SP_DEST_PORT = "dest_port";
 	
-	private final static int DEFAULT_FRAME_RATE = 15;
-	private final static int DEFAULT_BIT_RATE = 500000;
+	private final static int DEFAULT_FRAME_RATE = 20;
+	private final static int DEFAULT_BIT_RATE = 1024 * 1024;
 
 	private SurfaceView mSurfaceView;
 	private SurfaceHolder mHolder;
 	private CameraPreview mCameraPreview;
 
-	boolean isStreaming = false;
-	AvcEncoder encoder;
-	DatagramSocket udpSocket;
-	InetAddress address;
-	int port;
-	ArrayList<byte[]> encDataList = new ArrayList<byte[]>();
-	ArrayList<Integer> encDataLengthList = new ArrayList<Integer>();
-	
-	Runnable senderRun = new Runnable() {
-		@Override
-		public void run()
-		{
-			while (isStreaming)
-			{
-				boolean empty = false;
-				byte[] encData = null;
-				
-				synchronized(encDataList)
-				{
-					if (encDataList.size() == 0)
-					{
-						empty = true;
-					}
-					else
-						encData = encDataList.remove(0);
-				}
-				if (empty)
-				{
-					try {
-						Thread.sleep(10);
-					} catch (InterruptedException e) {
-						e.printStackTrace();
-					}
-					continue;
-				}
-		        try 
-		        {         
-		        	DatagramPacket packet = new DatagramPacket(encData, encData.length, address, port);  
-		            udpSocket.send(packet);  
-		        }
-		        catch (IOException e)  
-		        {  
-		          	e.printStackTrace();
-		        }				
-			}
-			//TODO:
-		}
-	};
+	private RtpSenderWrapper mRtpSenderWrapper;
+	private byte[] h264 ;
+
+	private boolean isStreaming = false;
+	private AvcEncoder encoder;
+	private InetAddress address;
+	private int port;
+
 	
     @Override
     protected void onCreate(Bundle savedInstanceState) 
     {
+		StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder()
+				.detectDiskReads()
+				.detectDiskWrites()
+				.detectAll()   // or .detectAll() for all detectable problems
+				.penaltyLog()
+				.build());
+
+		StrictMode.setVmPolicy(new StrictMode.VmPolicy.Builder()
+				.detectLeakedSqlLiteObjects()
+				.detectLeakedClosableObjects()
+				.penaltyLog()
+				.penaltyDeath()
+				.build());
+
         super.onCreate(savedInstanceState);
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
         this.setContentView(R.layout.activity_main);
@@ -134,7 +111,7 @@ public class MainActivity extends Activity {
 		int width = sp.getInt(SP_CAM_WIDTH, 0);
 		int height = sp.getInt(SP_CAM_HEIGHT, 0);
 		mCameraPreview.setParameters(width,height);
-
+		h264 = new byte[ width * height * 3];
 		mSurfaceView = (SurfaceView) findViewById(R.id.svCameraPreview);
 		mHolder = mSurfaceView.getHolder();
 		mHolder.addCallback(mCameraPreview);
@@ -174,21 +151,31 @@ public class MainActivity extends Activity {
 		public void onPreviewFrame(byte[] data, Camera camera) {
 			if (isStreaming)
 			{
-				if (encDataLengthList.size() > 100)
-				{
-					Log.e(TAG, "OUT OF BUFFER");
-					return;
+				int ret = encoder.offerEncoder(data, h264);
+				if(ret > 0){
+					//实时发送数据流
+					mRtpSenderWrapper.sendAvcPacket(h264, 0, ret, 0);
 				}
-
-				byte[] encData = encoder.offerEncoder(data);
-				if (encData.length > 0)
-				{
-					synchronized(encDataList)
-					{
-						encDataList.add(encData);
-					}
-				}
+//				if (encDataLengthList.size() > 100)
+//				{
+//					Log.e(TAG, "OUT OF BUFFER");
+//					return;
+//				}
+//
+//				byte[] encData = encoder.offerEncoder(data);
+//				if (encData.length > 0)
+//				{
+//					synchronized(encDataList)
+//					{
+//						encDataList.add(encData);
+//					}
+//				}
 			}
+
+
+
+
+
 			camera.addCallbackBuffer(data);
 		}
 	};
@@ -202,31 +189,22 @@ public class MainActivity extends Activity {
         
         this.encoder = new AvcEncoder();
         this.encoder.init(width, height, DEFAULT_FRAME_RATE, DEFAULT_BIT_RATE);
-        
-        try
-        {  
-        	this.udpSocket = new DatagramSocket();  
+
+        try {
             this.address = InetAddress.getByName(ip); 
             this.port = port;
-        }
-        catch (SocketException e)
-        {  
-            // TODO Auto-generated catch block  
-        	e.printStackTrace();
-        	return;
-        }
-        catch (UnknownHostException e) 
-        {  
+        } catch (UnknownHostException e) {
             // TODO Auto-generated catch block
         	e.printStackTrace();
         	return;
-        }  
+        }
+
 		sp.edit().putString(SP_DEST_IP, ip).commit();
 		sp.edit().putInt(SP_DEST_PORT, port).commit();
 
+		this.mRtpSenderWrapper = new RtpSenderWrapper(ip, port, false);
+
         this.isStreaming = true;
-        Thread thrd = new Thread(senderRun);
-        thrd.start();
         
 		((Button)this.findViewById(R.id.btnStream)).setText("Stop");		
 		this.findViewById(R.id.btnCamSize).setEnabled(false);
@@ -244,16 +222,16 @@ public class MainActivity extends Activity {
 	}
 
 	
-	private void showStreamDlg()
-	{        
+	private void showStreamDlg() {
+
 		LayoutInflater inflater = this.getLayoutInflater();
 		View content = inflater.inflate(R.layout.stream_dlg_view, null);
 		
 		SharedPreferences sp = this.getPreferences(Context.MODE_PRIVATE);
         String ip = sp.getString(SP_DEST_IP, "");
         int port = sp.getInt(SP_DEST_PORT, -1);
-        if (ip.length() > 0)
-        {
+
+		if (ip.length() > 0) {
         	EditText etIP = (EditText)content.findViewById(R.id.etIP);
         	etIP.setText(ip);
         	EditText etPort = (EditText)content.findViewById(R.id.etPort);
@@ -273,12 +251,9 @@ public class MainActivity extends Activity {
 					EditText etPort = (EditText) ((AlertDialog)dialog).findViewById(R.id.etPort);
 					String ip = etIP.getText().toString();
 					int port = Integer.valueOf(etPort.getText().toString());
-					if (ip.length() > 0 && (port >=0 && port <= 65535))
-					{
+					if (ip.length() > 0 && (port >=0 && port <= 65535)) {
 						startStream(ip, port);
-					}
-					else
-					{
+					} else {
 						//TODO:
 					}					
 				}
@@ -315,6 +290,7 @@ public class MainActivity extends Activity {
 					sp.edit().putInt(SP_CAM_HEIGHT, s.height).commit();
 					
 					mCameraPreview.changeResolution(s.width,s.height);
+					h264 = new byte[ s.width * s.height * 3];
 				}
 			});
 		dlgBld.setNegativeButton(android.R.string.cancel, null);

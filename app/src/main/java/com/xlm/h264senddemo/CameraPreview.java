@@ -35,8 +35,10 @@ public class CameraPreview implements SurfaceHolder.Callback {
     }
 
     public void setParameters(int width,int height){
-        mWidth = width;
-        mHeight = height;
+        if (width > 0 && height > 0) {
+            mWidth = width;
+            mHeight = height;
+        }
     }
 
 
